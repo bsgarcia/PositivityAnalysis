@@ -1,0 +1,7 @@
+
+pbeta1 = log(gampdf(beta1, 1.6, 2.3));
+palpha1 = log(betapdf(alpha1, 0.9, 1.4));
+palpha2 = log(betapdf(alpha2, 0.4, 1.1));
+ppri = log(unifpdf(pri, -1, 1));
+pphi = log(normpdf(phi, 0.5, 0.5));
+ptau = log(gampdf(tau, 2.2, 0.2));

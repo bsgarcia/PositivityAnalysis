@@ -1,0 +1,226 @@
+% main function that calls the others
+
+close all
+
+addpath './simulation'
+addpath './fit'
+addpath './utils'
+
+%% ----------------------- Variables to modify -------------------------- % 
+whichmodel = [1, 2, 4, 5];
+nmodel = length(whichmodel);
+%% ---------------------------------------------------------------------- %
+%% Set  variables
+condlabels = {'risk', 'statusquo1', 'statusquo2'};
+
+nparam = 5;
+tmax = 4*48;
+models = {'QLearning', 'Asymmetric', 'AsymmetricPessimistic',...
+    'Perseveration', 'Priors', 'Full'};
+
+% 1: basic df=2
+% 2: asymmetric neutral df=3
+% 3: asymmetric pessimistic df=3
+% 4: perseveration df=3
+% 5: priors df=3
+% 6: full df=5
+options = optimset( ...
+    'Algorithm', ...
+    'interior-point', ...
+    'Display', 'off', ...
+    'MaxIter', 2000, ...
+    'MaxFunEval', 2000);
+%'UseParallel', true);
+
+w = waitbar(0, 'Get data');
+
+for i = 1:length(condlabels)
+    
+    waitbar(i/length(condlabels), w, 'Get data');
+
+    try
+        [lpp, parameters] = getdata(condlabels{i});
+    catch
+        [lpp, parameters] = runfit(condlabels{i}, nmodel, whichmodel, nparam,...
+            options, w);
+    end
+    
+    subjecttot = length(lpp(1, 1, :));
+    
+    [bic, aic] = computebicaic(lpp, tmax, nmodel, subjecttot, whichmodel);
+    
+    % Compute the posterior probabilities
+    bicmatrix = computeposterior(...
+        bic, whichmodel, nmodel, models, subjecttot, condlabels{i});
+    
+    aicmatrix = computeposterior(...
+        aic, whichmodel, nmodel, models, subjecttot, condlabels{i});
+    
+    xlabels = {models{whichmodel}};
+    ylabels = {models{whichmodel}};
+    
+    % plot bic recovery for one condition
+    plotheatmap(bicmatrix, xlabels, ylabels,...
+        'Fitted model', 'Simulated data using model x',...
+        sprintf('BIC Condition %s', condlabels{i}),...
+        'mean of posterior probabilities');
+    
+    % plot aic recovery for one condition
+    plotheatmap(aicmatrix, xlabels, ylabels,...
+        'Fitted model', 'Simulated data using model x',...
+        sprintf('AIC Condition %s', condlabels{i}),...
+        'mean of posterior probabilities');
+    
+end
+close(w);
+
+%% ---------------------- Plot functions -------------------------------- % 
+
+function plotheatmap(data, xlabels, ylabels, xaxislabel, yaxislabel, titlelabel,...
+    cname)
+    f = figure('Renderer', 'painters', 'Position', [10 10 800 700]);
+    h = heatmap(xlabels, ylabels, data);    
+    title(titlelabel);
+    ax = gca;
+    axs = struct(ax);   %and ignore the warning
+    warning('off', 'last');
+    xlabel(xaxislabel);   
+    ylabel(yaxislabel);
+    %then ax becomes the handle to the heatmap
+    c = axs.Colorbar;    %now you have a handle to the colorbar object    
+    c.Label.String = cname;
+    %set(c.Label, 'Rotation', -360+-90);
+    saveas(f, sprintf('recovery_%s_%d.png', titlelabel, length(xlabels)));
+end
+
+%% ---------------------- computation functions -------------------------------- % 
+
+function [bic, aic] = computebicaic(lpp, tmax, nmodel, subjecttot, whichmodel)
+    % 1: basic df=2
+    % 2: asymmetric neutral df=3
+    % 3: asymmetric pessimistic df=3
+    % 4: perseveration df=3
+    % 5: priors df=3
+    % 6: full df=5
+    nfpm = [2, 3, 3, 3, 3, 5];
+
+    bic = zeros(nmodel, nmodel, subjecttot);
+    aic = zeros(nmodel, nmodel, subjecttot);
+
+    for fittedmodel = whichmodel
+        bic(fittedmodel, whichmodel, :) = -2 * -lpp(fittedmodel, whichmodel, :)...
+            + nfpm(fittedmodel) * log(tmax);
+        
+        aic(fittedmodel, whichmodel, :) = -2 * -lpp(fittedmodel, whichmodel, :)...
+            + 2*nfpm(fittedmodel);
+       
+    end
+end
+
+function matrix = computeposterior(...
+    criterion, whichmodel, nmodel, models, subjecttot, cond)
+    i = 0;
+    for datamodel = whichmodel
+        i = i + 1;
+        %set options
+        %options.modelNames = models(whichmodel);
+        options.figName = sprintf(...
+            '%s condition, data generated using %s', cond, models{datamodel});
+        options.DisplayWin = false;
+        
+        formatedmatrix(1:nmodel, 1:subjecttot) = -criterion(whichmodel, datamodel, :);
+        
+        [posterior, outcome] = VBA_groupBMC(formatedmatrix, options);
+        for fittedmodel = 1:nmodel
+            matrix(i, fittedmodel) = mean(posterior.r(fittedmodel, :));
+        end
+    end
+end
+
+function bicmatrix = computepercentagewinning(...
+    bic, whichmodel, nmodel, subjecttot)
+
+    bicmatrix = zeros(nmodel, nmodel);
+    for datamodel = whichmodel       
+        for sub = 1:subjecttot
+            [useless, argmin] = min(bic(:, datamodel, sub));
+             bicmatrix(datamodel, argmin) = bicmatrix(datamodel, argmin) + 1;
+        end
+    end
+    bicmatrix = bicmatrix ./ (subjecttot/100);
+end
+
+%% --------------------------- Get fit data functions ------------ % 
+
+function [lpp, parameters] = getdata(file)
+        data = load(sprintf('data/fit_sim/%s', file));
+        lpp = data.data('lpp');
+        parameters = data.data('parameters');
+end
+
+function [lpp, parameters] = runfit(file, nmodel, whichmodel, nparam,...
+    options, w)
+    [
+        con, ...
+        con2,....
+        cho, ...
+        out, ...
+        nsubs, ...
+    ] = load_data('sim', file);
+
+    subjecttot = nsubs;
+    parameters = repelem({zeros(subjecttot, nparam, nmodel)}, nmodel);
+    lpp = zeros(nmodel, nmodel, subjecttot);
+    report = repelem({zeros(subjecttot, nmodel)}, nmodel);
+    gradient = repelem({cell(subjecttot, nmodel)}, nmodel);
+    hessian = repelem({cell(subjecttot, nmodel)}, nmodel);
+
+    for nsub = 1:subjecttot
+        if ~(mod(nsub, 5))
+            waitbar( ...
+                nsub/subjecttot, ... % Compute progression
+                w, ...
+                sprintf('Fitting subject %d for cond %s ', nsub, file) ...
+            );
+        end
+        parfor fittedmodel = whichmodel
+            templpp = [];
+            for datamodel = whichmodel
+                [
+                    p, ...
+                    l, ...
+                    rep, ...
+                    grad, ...
+                    hess, ...
+                    ] = fmincon( ...
+                            @(x) ...
+                            getlpp( ...
+                                x, ...
+                                con{nsub}(:, :, datamodel), ...
+                                cho{nsub}(:, :, datamodel), ...
+                                out{nsub}(:, :, datamodel), ...
+                                fittedmodel ...
+                            ), ...
+                        [1, .5, .5, 0, 0], ...
+                        [], [], [], [], ...
+                        [0, 0, 0, -2, -1], ...
+                        [Inf, 1, 1, 2, 1], ...
+                        [], ...
+                        options ...
+                    );
+
+                parameters{fittedmodel}(nsub, :, datamodel) = p;
+                templpp(datamodel) = l;
+                report{fittedmodel}(nsub, datamodel) = rep;
+                gradient{fittedmodel}{nsub, datamodel} = grad;
+                hessian{fittedmodel}{nsub, datamodel} = hess;
+
+            end
+            lpp(fittedmodel, :, nsub) = templpp;
+        end
+    end
+    data = containers.Map({'parameters', 'lpp'},....
+            {parameters, lpp}...
+    );
+    save(sprintf('data/fit_sim/%s', file), 'data');
+end
